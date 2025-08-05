@@ -1,0 +1,642 @@
+<!DOCTYPE html>
+
+<html lang="sr">
+<head>
+<meta charset="utf-8"/>
+<meta content="width=device-width,initial-scale=1" name="viewport"/>
+<title>Raspored gostiju — web</title>
+<style>
+  html,body{height:100%;margin:0;font-family:Arial,Helvetica,sans-serif}
+  #toolbar{display:flex;gap:8px;padding:8px;background:#f2f4f7;border-bottom:1px solid #ddd;align-items:center}
+  #canvas-wrap{position:relative;flex:1;overflow:hidden;background:linear-gradient(#fff,#f8fbff)}
+  #stage{width:3000px;height:2000px;background:transparent;touch-action:none}
+  button,input,select{padding:6px 8px;border:1px solid #bbb;background:#fff;border-radius:6px}
+  #controls{margin-left:auto;color:#666;font-size:13px}
+  .small{font-size:13px;padding:4px 6px}
+  #file-input{display:none}
+  footer{padding:6px 10px;color:#666;font-size:13px;background:#fafbfc;border-top:1px solid #eee}
+  @media (max-width:600px){ #toolbar{flex-wrap:wrap} }
+
+  text {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+  }
+</style>
+</head>
+<body>
+<div id="toolbar">
+<button id="add-table">➕ Dodaj sto</button>
+<button id="remove-table">➖ Ukloni sto</button>
+<button id="save-json">💾 Snimi (.json)</button>
+<button id="load-json">📂 Učitaj (.json)</button>
+<button id="export-png">🖼️ Export PNG</button>
+<button id="show-list">📋 Prikaži spisak</button>
+<input accept="application/json" id="file-input" type="file"/>
+<div id="controls">Prevuci sto da ga pomeriš • Desni/srednji taster ili touch-drag za pomeranje površine</div>
+<button onclick="saveOnline()">🌐 Snimi online</button><button onclick="loadOnline()">🌐 Učitaj online</button></div>
+<div id="canvas-wrap" style="height:calc(100vh - 86px);">
+<!-- SVG scena -->
+<svg id="stage" xmlns="http://www.w3.org/2000/svg">
+<defs>
+<filter height="200%" id="shadow" width="200%" x="-50%" y="-50%">
+<fedropshadow dx="0" dy="2" flood-color="#000" flood-opacity="0.12" stddeviation="3"></fedropshadow>
+</filter>
+</defs>
+</svg>
+<style>
+  html,body{height:100%;margin:0;font-family:Arial,Helvetica,sans-serif}
+  #toolbar{display:flex;gap:8px;padding:8px;background:#f2f4f7;border-bottom:1px solid #ddd;align-items:center}
+  #canvas-wrap{position:relative;flex:1;overflow:hidden;background:linear-gradient(#fff,#f8fbff)}
+  #stage{width:3000px;height:2000px;background:transparent;touch-action:none}
+  button,input,select{padding:6px 8px;border:1px solid #bbb;background:#fff;border-radius:6px}
+  #controls{margin-left:auto;color:#666;font-size:13px}
+  .small{font-size:13px;padding:4px 6px}
+  #file-input{display:none}
+  footer{padding:6px 10px;color:#666;font-size:13px;background:#fafbfc;border-top:1px solid #eee}
+  @media (max-width:600px){ #toolbar{flex-wrap:wrap} }
+
+  text {
+    user-select: none;
+    -webkit-user-select: none;
+    -moz-user-select: none;
+    -ms-user-select: none;
+  }
+</style>
+<div id="list-modal" style="display:none; position:fixed; top:50px; left:50%; transform:translateX(-50%); background:white; border:1px solid #ccc; border-radius:8px; max-height:70vh; overflow:auto; padding:20px; box-shadow:0 2px 12px rgba(0,0,0,0.2); z-index:1000;">
+<button onclick="document.getElementById('list-modal').style.display='none'" style="float:right;">✖</button>
+<h3>Spisak gostiju</h3>
+<div id="list-content" style="font-family:monospace; font-size:14px; white-space:pre;"></div>
+</div>
+</div>
+<footer>Sačuvano u lokalnoj memoriji. Pošalji .html fajl ili postavi na GitHub Pages/Netlify da bude dostupan preko linka.</footer>
+<script>
+/*
+  seating_planner_web.html
+  Single-file web app: drag/drop tables, seats, two-line names (ime/prezime),
+  auto font-size, save/load JSON, export PNG.
+  Dodat: pinch-to-zoom i long-press touch drag (ne briše se postojeći kod).
+*/
+
+(() => {
+  const svg = document.getElementById('stage');
+  const wrap = document.getElementById('canvas-wrap');
+  let tables = {}; // id -> table object
+  let nextId = 1;
+
+  // View transform (pan + scale)
+  let viewX = 0, viewY = 0; // pixels offset applied to stage via transform
+  let scale = 1;           // zoom scale
+  function applyView() {
+    // apply translate then scale, origin top-left
+    svg.style.transformOrigin = "0 0";
+    svg.style.transform = `translate(${-viewX}px,${-viewY}px) scale(${scale})`;
+  }
+  applyView();
+
+  // Helpers
+  function createSVG(tag, attrs={}) {
+    const el = document.createElementNS('http://www.w3.org/2000/svg', tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    return el;
+  }
+
+  // Add table UI
+  document.getElementById('add-table').addEventListener('click', () => {
+    const num = prompt("Broj mesta za sto (10-12):", "10");
+    if (!num) return;
+    const n = Math.max(1, Math.min(12, parseInt(num) || 10));
+    addTable(n);
+  });
+
+  // Remove table by id prompt
+  document.getElementById('remove-table').addEventListener('click', () => {
+    const ids = Object.keys(tables).map(x=>parseInt(x)).sort((a,b)=>a-b);
+    if (!ids.length) { alert("Nema stolova."); return; }
+    const txt = ids.join(', ');
+    const chosen = prompt(`Unesi id stola za uklanjanje (${txt}):`);
+    if (!chosen) return;
+    const id = parseInt(chosen);
+    if (tables[id]) removeTable(id); else alert("Nevažeći id.");
+  });
+
+  // Save JSON download
+  document.getElementById('save-json').addEventListener('click', () => {
+    const data = {tables: Object.values(tables).map(t=>serializeTable(t))};
+    const blob = new Blob([JSON.stringify(data, null, 2)], {type:'application/json;charset=utf-8'});
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'seating_layout.json';
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // Load JSON from file input
+  const fileInput = document.getElementById('file-input');
+  document.getElementById('load-json').addEventListener('click', ()=> fileInput.click());
+  fileInput.addEventListener('change', (ev)=>{
+    const f = ev.target.files[0]; if (!f) return;
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const data = JSON.parse(e.target.result);
+        loadFromData(data);
+      } catch (err) { alert("Neuspešno učitavanje JSON-a: "+err); }
+    };
+    reader.readAsText(f, 'utf-8');
+    fileInput.value = '';
+  });
+
+  // Export PNG
+  document.getElementById('export-png').addEventListener('click', async ()=>{
+    // clone svg and render current visible area
+    const clone = svg.cloneNode(true);
+    const w = wrap.clientWidth, h = wrap.clientHeight;
+    clone.setAttribute('width', w);
+    clone.setAttribute('height', h);
+    // our view transforms are translate(viewX,viewY) scale(scale)
+    // To create viewBox we need to map visible area in stage coordinates:
+    const vbX = viewX;
+    const vbY = viewY;
+    const vbW = Math.round(w / scale);
+    const vbH = Math.round(h / scale);
+    clone.setAttribute('viewBox', `${vbX} ${vbY} ${vbW} ${vbH}`);
+    const xml = new XMLSerializer().serializeToString(clone);
+    const svg64 = 'data:image/svg+xml;charset=utf-8,' + encodeURIComponent(xml);
+    const img = new Image();
+    img.onload = () => {
+      const c = document.createElement('canvas');
+      c.width = w; c.height = h;
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0,0,w,h);
+      ctx.drawImage(img,0,0,w,h);
+      const link = document.createElement('a');
+      link.download = 'seating.png';
+      link.href = c.toDataURL('image/png');
+      link.click();
+    };
+    img.onerror = ()=> alert("Export nije mogao da se izvrši.");
+    img.src = svg64;
+  });
+
+  // Persist to localStorage on change
+  function persist() {
+    try {
+      const data = {tables: Object.values(tables).map(t=>serializeTable(t))};
+      localStorage.setItem('seating_layout_v1', JSON.stringify(data));
+    } catch(e){}
+  }
+  // Load from local storage on start
+  const saved = localStorage.getItem('seating_layout_v1');
+  if (saved) {
+    try { loadFromData(JSON.parse(saved)); } catch(e){}
+  }
+
+  // Table creation, SVG structure
+  function addTable(numSeats, x=200 + (nextId*150)%2000, y=200 + Math.floor((nextId*150)/2000)*220) {
+    const id = nextId++;
+    const group = createSVG('g', {class:'table', 'data-id':id});
+    // center table circle
+    const cx = x, cy = y;
+    const tableRadius = 50;
+    const seatRadius = 28;
+    const orbit = 110;
+
+    const center = createSVG('circle', {cx, cy, r:tableRadius, fill:'#ddd', stroke:'#999', 'stroke-width':1, filter:'url(#shadow)'});
+    const centerText = createSVG('text', {x:cx, y:cy+4, 'text-anchor':'middle', 'font-size':12, 'font-weight':'bold'});
+    centerText.textContent = `Sto ${id}`;
+
+    group.appendChild(center);
+    group.appendChild(centerText);
+
+    // seats
+    const seatItems = [];
+    for (let i=0;i<numSeats;i++){
+      const angle = 2*Math.PI*i/numSeats - Math.PI/2;
+      const sx = cx + orbit*Math.cos(angle);
+      const sy = cy + orbit*Math.sin(angle);
+
+      const seatGroup = createSVG('g', {'data-seat':i, class:'seat'});
+      const seatCircle = createSVG('circle', {cx:sx, cy:sy, r:seatRadius, fill:'#fff', stroke:'#aaa', 'stroke-width':1});
+      const seatText = createSVG('text', {x:sx, y:sy, 'text-anchor':'middle', 'font-size':9, 'dominant-baseline':'middle'});
+      seatGroup.appendChild(seatCircle);
+      seatGroup.appendChild(seatText);
+      group.appendChild(seatGroup);
+
+      // click to edit
+      seatGroup.addEventListener('click', (ev)=>{
+        ev.stopPropagation();
+        const current = seatItems[i].name || '';
+        const name = prompt(`Unesi ime (ime prezime). Prazno = obriši:`, current);
+        if (name === null) return;
+        setSeatName(tableObj, i, name.trim() || null);
+        persist();
+      });
+
+      seatItems.push({circle:seatCircle, text:seatText, name:null});
+    }
+
+    svg.appendChild(group);
+
+    // table object model
+    const tableObj = {
+      id, group, center, centerText, seatItems,
+      cx, cy, orbit, tableRadius, seatRadius
+    };
+
+    // dragging
+    let dragging = false, dragOffset = {x:0,y:0};
+    function startDrag(ev){
+      // ev can be pointer event or touch point; normalize
+      const e = ('clientX' in ev) ? ev : {clientX: ev.clientX, clientY: ev.clientY};
+      dragging = true;
+      // pointer coordinates in page, convert to svg coords by adding view offsets
+      dragOffset.x = getEventSvgX(e) - tableObj.cx;
+      dragOffset.y = getEventSvgY(e) - tableObj.cy;
+      // bring to front
+      svg.appendChild(group);
+    }
+    function doDrag(ev){
+      if (!dragging) return;
+      const ex = getEventSvgX(ev);
+      const ey = getEventSvgY(ev);
+      const nx = ex - dragOffset.x, ny = ey - dragOffset.y;
+      moveTableTo(tableObj, nx, ny);
+    }
+    function endDrag(ev){
+      dragging = false;
+      persist();
+    }
+
+    // pointer events on center text & circle to move table
+    center.addEventListener('pointerdown', startDrag);
+    centerText.addEventListener('pointerdown', startDrag);
+    center.addEventListener('pointermove', doDrag);
+    centerText.addEventListener('pointermove', doDrag);
+    window.addEventListener('pointerup', endDrag);
+    // also allow dragging by touching any child with class 'table' (so clicking center area works)
+    group.addEventListener('pointerdown', (ev)=>{
+      // if clicked on a seat (circle/text), ignore (seats handle clicks)
+      if (ev.target.closest('.seat')) return;
+      startDrag(ev);
+    });
+    group.addEventListener('pointermove', doDrag);
+
+    // --- TOUCH: long-press to start dragging table (so single-finger pan doesn't move table unintentionally)
+    // store timeout handle per group
+    let touchDragTimeout = null;
+    let touchWasMoved = false;
+
+    group.addEventListener('touchstart', (ev)=>{
+      // if touched on seat, skip (seats handle clicks)
+      if (ev.target.closest('.seat')) return;
+      touchWasMoved = false;
+      // start a short timeout; if finger held for e.g. 220ms without moving, start dragging this table
+      touchDragTimeout = setTimeout(()=>{
+        // start drag with first touch point
+        const t = ev.touches[0];
+        if (t) {
+          // prevent the global panning
+          ev.preventDefault();
+          startDrag(t);
+        }
+      }, 220);
+    }, {passive:false});
+
+    group.addEventListener('touchmove', (ev)=>{
+      touchWasMoved = true;
+      // if dragging already started (dragging === true), call doDrag with touch point
+      if (dragging) {
+        const t = ev.touches[0];
+        if (t) doDrag(t);
+      } else {
+        // if moved significantly before timeout, cancel long-press
+        // compute movement from initial touch
+        // (can't easily get initial pos here without tracking, so just cancel)
+        if (touchDragTimeout) {
+          clearTimeout(touchDragTimeout);
+          touchDragTimeout = null;
+        }
+      }
+    }, {passive:false});
+
+    group.addEventListener('touchend', (ev)=>{
+      if (touchDragTimeout) {
+        clearTimeout(touchDragTimeout);
+        touchDragTimeout = null;
+      }
+      if (dragging) endDrag(ev);
+    });
+
+    // create model entry
+    tables[id] = tableObj;
+    persist();
+    return tableObj;
+  }
+
+  function moveTableTo(tableObj, nx, ny){
+    const dx = nx - tableObj.cx, dy = ny - tableObj.cy;
+    tableObj.cx = nx; tableObj.cy = ny;
+    // move center
+    tableObj.center.setAttribute('cx', tableObj.cx);
+    tableObj.center.setAttribute('cy', tableObj.cy);
+    tableObj.centerText.setAttribute('x', tableObj.cx);
+    tableObj.centerText.setAttribute('y', tableObj.cy + 4);
+    // move seats around
+    const N = tableObj.seatItems.length;
+    for (let i=0;i<N;i++){
+      const angle = 2*Math.PI*i/N - Math.PI/2;
+      const sx = tableObj.cx + tableObj.orbit*Math.cos(angle);
+      const sy = tableObj.cy + tableObj.orbit*Math.sin(angle);
+      const item = tableObj.seatItems[i];
+      item.circle.setAttribute('cx', sx); item.circle.setAttribute('cy', sy);
+      item.text.setAttribute('x', sx); item.text.setAttribute('y', sy);
+	  const tspans = item.text.querySelectorAll('tspan');
+	  tspans.forEach(t => t.setAttribute('x', sx));
+    }
+  }
+
+  function removeTable(id){
+    const t = tables[id];
+    if (!t) return;
+    svg.removeChild(t.group);
+    delete tables[id];
+    persist();
+  }
+
+  function serializeTable(t){
+    return {
+      id: t.id,
+      cx: t.cx, cy: t.cy, orbit: t.orbit,
+      tableRadius: t.tableRadius, seatRadius: t.seatRadius,
+      seats: t.seatItems.map(s=>s.name)
+    };
+  }
+
+  function loadFromData(data){
+    // clear
+    Object.keys(tables).forEach(k => { svg.removeChild(tables[k].group); delete tables[k]; });
+    nextId = 1;
+    if (!data || !Array.isArray(data.tables)) return;
+    for (const s of data.tables){
+      const t = addTable((s.seats && s.seats.length) || 10, s.cx || 200, s.cy || 200);
+      // apply seat names
+      if (s.seats){
+        for (let i=0;i<s.seats.length;i++){
+          setSeatName(t, i, s.seats[i]);
+        }
+      }
+      // ensure id matches? we keep generated ids but that's fine
+    }
+    persist();
+  }
+
+  // set seat name with two-line logic and auto font size
+  function setSeatName(tableObj, seatIndex, name){
+    const seat = tableObj.seatItems[seatIndex];
+    seat.name = name;
+    if (!name){
+      seat.text.textContent = '';
+      seat.circle.setAttribute('fill','#fff');
+      return;
+    }
+    const trimmed = name.trim();
+    let display = trimmed;
+    if (trimmed.includes(' ')){
+      const parts = trimmed.split(/\s+/,2);
+      display = parts[0] + '\n' + parts[1];
+    }
+    // determine longest line length (characters) - rough heuristic
+    const lines = display.split('\n');
+    const longest = lines.reduce((a,b)=> a.length>=b.length?a:b,"");
+    let fontSize;
+    if (longest.length <= 12) fontSize = 9;
+    else if (longest.length <= 18) fontSize = 8;
+    else fontSize = 7;
+    // apply text: SVG text with tspans
+    while (seat.text.firstChild) seat.text.removeChild(seat.text.firstChild);
+    if (lines.length === 1){
+      const t1 = document.createElementNS('http://www.w3.org/2000/svg','tspan');
+      t1.setAttribute('x', seat.text.getAttribute('x'));
+      t1.setAttribute('dy', '0');
+      t1.setAttribute('font-size', fontSize);
+      t1.setAttribute('font-weight', '700');
+      t1.textContent = lines[0];
+      seat.text.appendChild(t1);
+      // center vertically manually (dominant-baseline middle already set)
+    } else {
+      const t1 = document.createElementNS('http://www.w3.org/2000/svg','tspan');
+      t1.setAttribute('x', seat.text.getAttribute('x'));
+      t1.setAttribute('dy', '-4'); // shift up a bit
+      t1.setAttribute('font-size', fontSize);
+      t1.setAttribute('font-weight', '700');
+      t1.textContent = lines[0];
+      const t2 = document.createElementNS('http://www.w3.org/2000/svg','tspan');
+      t2.setAttribute('x', seat.text.getAttribute('x'));
+      t2.setAttribute('dy', `${fontSize+2}`); // below
+      t2.setAttribute('font-size', fontSize);
+      t2.setAttribute('font-weight', '700');
+      t2.textContent = lines[1];
+      seat.text.appendChild(t1); seat.text.appendChild(t2);
+    }
+    seat.circle.setAttribute('fill','#cfeffd');
+  }
+
+  // Helpers to get pointer coords in stage (accounting for viewX/viewY and scale)
+  function getEventSvgX(ev){
+    // client coordinates => add view offsets to get stage coords, accounting for scale
+    const rect = wrap.getBoundingClientRect();
+    return viewX + (ev.clientX - rect.left) / scale;
+  }
+  function getEventSvgY(ev){
+    const rect = wrap.getBoundingClientRect();
+    return viewY + (ev.clientY - rect.top) / scale;
+  }
+
+  // Panning implementation (background drag) - adjusted for scale
+  let panning = false, panStart = {x:0,y:0}, viewStart = {x:0,y:0};
+  wrap.addEventListener('pointerdown', (ev)=>{
+    // don't start panning if pointer is on a table item (we want table long-press to handle)
+    // Right (button 2) or middle (button 1 in some devices) start panning
+    if (ev.button === 2 || ev.button === 1) {
+      panning = true;
+      panStart.x = ev.clientX; panStart.y = ev.clientY;
+      viewStart.x = viewX; viewStart.y = viewY;
+      wrap.style.cursor = 'grabbing';
+      ev.preventDefault();
+    } else {
+      // touch: if pointerdown on background, start panning (so mobile can move)
+      if (ev.pointerType === 'touch'){
+        // check if clicked on stage background (not on an element)
+        if (ev.target === svg || ev.target === wrap) {
+          panning = true; panStart.x = ev.clientX; panStart.y = ev.clientY; viewStart.x = viewX; viewStart.y = viewY;
+        }
+      }
+    }
+  }, {passive:false});
+
+  window.addEventListener('pointermove', (ev)=>{
+    if (!panning) return;
+    const dx = ev.clientX - panStart.x;
+    const dy = ev.clientY - panStart.y;
+    // movement must be scaled relative to zoom
+    viewX = Math.max(0, Math.min(3000 - Math.round(wrap.clientWidth/scale), viewStart.x - Math.round(dx/scale)));
+    viewY = Math.max(0, Math.min(2000 - Math.round(wrap.clientHeight/scale), viewStart.y - Math.round(dy/scale)));
+    applyView();
+  }, {passive:false});
+
+  window.addEventListener('pointerup', (ev)=>{
+    if (panning){
+      panning = false;
+      wrap.style.cursor = 'default';
+    }
+  });
+
+  // Prevent context menu on right-click inside wrap
+  wrap.addEventListener('contextmenu', (ev)=> ev.preventDefault());
+
+  // Mouse wheel for vertical scroll / shift horizontal and wheel-zoom with ctrlKey
+  wrap.addEventListener('wheel', (ev)=>{
+    ev.preventDefault();
+    if (ev.ctrlKey) {
+      // zoom under cursor
+      const rect = wrap.getBoundingClientRect();
+      const mouseX = ev.clientX - rect.left;
+      const mouseY = ev.clientY - rect.top;
+      const beforeX = viewX + mouseX / scale;
+      const beforeY = viewY + mouseY / scale;
+      const delta = -ev.deltaY;
+      const factor = delta > 0 ? 1.08 : 1/1.08;
+      scale = Math.max(0.5, Math.min(3, scale * factor));
+      // adjust viewX/viewY so that zoom centers on mouse
+      viewX = Math.max(0, Math.min(3000 - Math.round(wrap.clientWidth/scale), Math.round(beforeX - mouseX/scale)));
+      viewY = Math.max(0, Math.min(2000 - Math.round(wrap.clientHeight/scale), Math.round(beforeY - mouseY/scale)));
+      applyView();
+    } else {
+      // regular scroll: vertical or horizontal with shift
+      if (ev.shiftKey){
+        viewX = Math.max(0, Math.min(3000 - Math.round(wrap.clientWidth/scale), viewX + ev.deltaY / scale));
+      } else {
+        viewY = Math.max(0, Math.min(2000 - Math.round(wrap.clientHeight/scale), viewY + ev.deltaY / scale));
+      }
+      applyView();
+    }
+  }, {passive:false});
+
+  // Touch pinch-to-zoom
+  let pinchStartDist = 0, pinchStartScale = 1, pinchMid = {x:0,y:0};
+  wrap.addEventListener('touchstart', (ev)=>{
+    if (ev.touches.length === 2) {
+      const t0 = ev.touches[0], t1 = ev.touches[1];
+      pinchStartDist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+      pinchStartScale = scale;
+      // midpoint in client coords
+      pinchMid.x = (t0.clientX + t1.clientX) / 2;
+      pinchMid.y = (t0.clientY + t1.clientY) / 2;
+      ev.preventDefault();
+    }
+  }, {passive:false});
+
+  wrap.addEventListener('touchmove', (ev)=>{
+    if (ev.touches.length === 2) {
+      const t0 = ev.touches[0], t1 = ev.touches[1];
+      const dist = Math.hypot(t0.clientX - t1.clientX, t0.clientY - t1.clientY);
+      const factor = dist / pinchStartDist;
+      // zoom keeping midpoint stable
+      const rect = wrap.getBoundingClientRect();
+      const midClientX = (t0.clientX + t1.clientX) / 2;
+      const midClientY = (t0.clientY + t1.clientY) / 2;
+      const beforeX = viewX + (midClientX - rect.left) / scale;
+      const beforeY = viewY + (midClientY - rect.top) / scale;
+
+      scale = Math.min(3, Math.max(0.5, pinchStartScale * factor));
+
+      // after zoom, recompute view so midpoint maps to same content point
+      viewX = Math.max(0, Math.min(3000 - Math.round(wrap.clientWidth/scale), Math.round(beforeX - (midClientX - rect.left) / scale)));
+      viewY = Math.max(0, Math.min(2000 - Math.round(wrap.clientHeight/scale), Math.round(beforeY - (midClientY - rect.top) / scale)));
+
+      applyView();
+      ev.preventDefault();
+    }
+  }, {passive:false});
+
+  wrap.addEventListener('touchend', (ev)=>{
+    // nothing special; pinch variables will be reset on next touchstart
+  });
+
+  // remove selection on double click background
+  svg.addEventListener('dblclick', ()=>{ /* reserved */ });
+
+  // load function for JSON structure
+  function loadFromData(data) {
+    // implemented earlier; keep for compatibility
+  }
+
+  // small wrapper to call internal loadFromData implementation above
+  window.loadFromData = (data) => {
+    // clear existing
+    Object.keys(tables).forEach(k => { svg.removeChild(tables[k].group); delete tables[k]; });
+    nextId = 1;
+    if (!data || !Array.isArray(data.tables)) return;
+    for (const s of data.tables){
+      const t = addTable((s.seats && s.seats.length) || 10, s.cx || 200, s.cy || 200);
+      if (s.seats) {
+        for (let i=0;i<s.seats.length;i++){
+          setSeatName(t, i, s.seats[i]);
+        }
+      }
+    }
+    persist();
+  };
+  
+  // Dugme za prikaz spiska stolova i imena
+  document.getElementById('show-list').addEventListener('click', () => {
+    const listDiv = document.getElementById('list-content');
+    let output = '';
+    const tableEntries = Object.values(tables).sort((a, b) => a.id - b.id);
+    for (const table of tableEntries) {
+      output += `Sto ${table.id}:\n`;
+      table.seatItems.forEach((seat, idx) => {
+        const name = seat.name ? seat.name : '(prazno)';
+        output += `  ${idx + 1}. ${name}\n`;
+      });
+      output += '\n';
+    }
+    listDiv.textContent = output.trim();
+    document.getElementById('list-modal').style.display = 'block';
+  });
+  // expose remove (used by toolbar)
+  window.removeTable = removeTable;
+
+  // initial small demo: add two tables if empty
+  if (!Object.keys(tables).length){
+    addTable(10, 300, 300);
+    addTable(11, 700, 350);
+  }
+})();
+</script>
+<script>
+async function saveOnline() {
+  const data = { tables: Object.values(tables).map(t => serializeTable(t)) };
+  const response = await fetch('/.netlify/functions/save-layout', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(data)
+  });
+  const res = await response.json();
+  alert(res.message || 'Greška pri čuvanju.');
+}
+
+async function loadOnline() {
+  const response = await fetch('/.netlify/functions/load-layout');
+  const data = await response.json();
+  if (data.tables) {
+    loadFromData(data);
+  } else {
+    alert("Greška pri učitavanju.");
+  }
+}
+</script></body>
+</html>
