@@ -620,23 +620,32 @@
 <script>
 async function saveOnline() {
   const data = { tables: Object.values(tables).map(t => serializeTable(t)) };
-  const response = await fetch('/.netlify/functions/save-layout', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(data)
-  });
-  const res = await response.json();
-  alert(res.message || 'Greška pri čuvanju.');
+  try {
+    await fetch('/.netlify/functions/save-layout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(data)
+    });
+    alert('Raspored uspešno sačuvan online.');
+  } catch (err) {
+    alert('Greška pri čuvanju: ' + err.message);
+  }
 }
 
 async function loadOnline() {
-  const response = await fetch('/.netlify/functions/load-layout');
-  const data = await response.json();
-  if (data.tables) {
-    loadFromData(data);
-  } else {
-    alert("Greška pri učitavanju.");
+  try {
+    const response = await fetch('/.netlify/functions/load-layout');
+    const data = await response.json();
+    if (data && data.tables) {
+      loadFromData(data);
+      alert('Raspored uspešno učitan online.');
+    } else {
+      alert("Nema podataka za učitavanje.");
+    }
+  } catch (err) {
+    alert("Greška pri učitavanju: " + err.message);
   }
 }
 </script></body>
 </html>
+
