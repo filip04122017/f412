@@ -1,16 +1,11 @@
-const fs = require('fs');
-const path = require('path');
+const axios = require("axios");
 
-exports.handler = async function(event, context) {
-  const filePath = path.join(__dirname, '..', '..', 'layout-data.json');
+exports.handler = async () => {
   try {
-    const content = fs.readFileSync(filePath, 'utf-8');
-    return {
-      statusCode: 200,
-      body: content,
-      headers: { "Content-Type": "application/json" }
-    };
+    const url = "https://f412-seating-default-rtdb.europe-west1.firebasedatabase.app/layout.json";
+    const res = await axios.get(url);
+    return { statusCode: 200, body: JSON.stringify(res.data || []) };
   } catch (err) {
-    return { statusCode: 404, body: JSON.stringify({ error: "File not found" }) };
+    return { statusCode: 500, body: err.message };
   }
 };
